@@ -81,7 +81,7 @@ When an official source does not provide a reliable application, registration, o
 
 ## 📥 Importing the Workflow
 
-1. Download `workflow/ai-opportunity-radar.json`.
+1. Download `Workflows/AI Opportunity Radar.json`.
 2. Open n8n.
 3. Create a new workflow.
 4. Import the downloaded JSON file.
