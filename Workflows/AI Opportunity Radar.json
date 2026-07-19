@@ -1,0 +1,1181 @@
+{
+  "name": "AI Opportunity Radar",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -800,
+        -144
+      ],
+      "id": "684f72f9-1df5-4dd5-bc32-1ffec34ee352",
+      "name": "Manual test"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -432,
+        -176
+      ],
+      "id": "83d5b9a8-2e90-43ff-86d6-e00870e0e172",
+      "name": "Weekly Schedule"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "AI Opportunity Radar"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Preferences",
+          "mode": "list",
+          "cachedResultName": "Preferences"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "active",
+              "lookupValue": "true"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -224,
+        -176
+      ],
+      "id": "7f0aeba0-763e-422c-8de2-606ded432319",
+      "name": "Read Preferences"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "AI Opportunity Radar"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Opportunities",
+          "mode": "list",
+          "cachedResultName": "Opportunities"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -16,
+        -176
+      ],
+      "id": "bcd4dcc4-6d26-4e26-962f-69adaaa6c1fd",
+      "name": "Read Opportunity History",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "function cleanString(value) {\n  return String(value ?? \"\")\n    .replace(/\\s+/g, \" \")\n    .trim();\n}\n\nfunction parseList(value) {\n  const entries = cleanString(value)\n    .split(/[,;|]/)\n    .map((entry) => entry.trim())\n    .filter(Boolean);\n\n  // Remove duplicates while ignoring case.\n  return [\n    ...new Map(\n      entries.map((entry) => [\n        entry.toLowerCase(),\n        entry,\n      ])\n    ).values(),\n  ];\n}\n\nfunction parseNumber(value, fallback, minimum, maximum) {\n  const parsed = Number(value);\n\n  if (!Number.isFinite(parsed)) {\n    return fallback;\n  }\n\n  return Math.min(\n    Math.max(Math.round(parsed), minimum),\n    maximum\n  );\n}\n\nfunction parseBoolean(value) {\n  if (typeof value === \"boolean\") {\n    return value;\n  }\n\n  return [\"true\", \"yes\", \"1\"].includes(\n    cleanString(value).toLowerCase()\n  );\n}\n\nfunction normalizeUrl(value) {\n  const rawUrl = cleanString(value);\n\n  if (!rawUrl) {\n    return null;\n  }\n\n  try {\n    const url = new URL(rawUrl);\n\n    // Remove common tracking parameters.\n    const trackingParameters = [\n      \"utm_source\",\n      \"utm_medium\",\n      \"utm_campaign\",\n      \"utm_term\",\n      \"utm_content\",\n      \"fbclid\",\n      \"gclid\",\n      \"ref\",\n      \"source\",\n    ];\n\n    for (const parameter of trackingParameters) {\n      url.searchParams.delete(parameter);\n    }\n\n    url.hash = \"\";\n\n    return url\n      .toString()\n      .replace(/\\/$/, \"\")\n      .toLowerCase();\n  } catch {\n    return rawUrl\n      .replace(/\\/$/, \"\")\n      .toLowerCase();\n  }\n}\n\nfunction getKarachiDate() {\n  const parts = new Intl.DateTimeFormat(\"en-CA\", {\n    timeZone: \"Asia/Karachi\",\n    year: \"numeric\",\n    month: \"2-digit\",\n    day: \"2-digit\",\n  }).formatToParts(new Date());\n\n  const dateParts = Object.fromEntries(\n    parts\n      .filter((part) => part.type !== \"literal\")\n      .map((part) => [part.type, part.value])\n  );\n\n  return `${dateParts.year}-${dateParts.month}-${dateParts.day}`;\n}\n\n// Read all rows returned by the Preferences node.\nconst preferenceRows = $(\"Read Preferences\")\n  .all()\n  .map((item) => item.json)\n  .filter(\n    (row) =>\n      row &&\n      Object.keys(row).length > 0 &&\n      parseBoolean(row.active)\n  );\n\nif (preferenceRows.length === 0) {\n  throw new Error(\n    'No active preference row was found. Add a row to the \"Preferences\" sheet with active set to TRUE.'\n  );\n}\n\nconst preference = preferenceRows[0];\n\nconst interests = parseList(preference.interests);\nconst opportunityTypes = parseList(\n  preference.opportunity_types\n);\nconst locations = parseList(preference.locations);\nconst keywords = parseList(preference.keywords);\n\nif (interests.length === 0) {\n  throw new Error(\n    \"The active preference row must contain at least one interest.\"\n  );\n}\n\nif (opportunityTypes.length === 0) {\n  throw new Error(\n    \"The active preference row must contain at least one opportunity type.\"\n  );\n}\n\nif (locations.length === 0) {\n  throw new Error(\n    \"The active preference row must contain at least one location.\"\n  );\n}\n\n// Read saved opportunities.\n// The empty item produced by Always Output Data is removed.\nconst existingOpportunities = $(\n  \"Read Opportunity History\"\n)\n  .all()\n  .map((item) => item.json)\n  .filter(\n    (row) =>\n      row &&\n      Object.keys(row).length > 0 &&\n      (cleanString(row.source_url) ||\n        cleanString(row.title))\n  )\n  .map((row) => ({\n    opportunity_id:\n      cleanString(row.opportunity_id) || null,\n\n    title:\n      cleanString(row.title) || null,\n\n    organizer:\n      cleanString(row.organizer) || null,\n\n    opportunity_type:\n      cleanString(row.opportunity_type) || null,\n\n    deadline:\n      cleanString(row.deadline) || null,\n\n    source_url:\n      cleanString(row.source_url) || null,\n\n    normalized_url:\n      normalizeUrl(\n        row.normalized_url || row.source_url\n      ),\n\n    status:\n      cleanString(row.status) || null,\n  }));\n\nconst today = getKarachiDate();\n\nconst minimumScore = parseNumber(\n  preference.minimum_score,\n  70,\n  0,\n  100\n);\n\nconst reminderDaysBefore = parseNumber(\n  preference.reminder_days_before,\n  7,\n  0,\n  90\n);\n\nconst maximumResults = parseNumber(\n  preference.maximum_results,\n  5,\n  1,\n  10\n);\n\nconst runId = [\n  \"opportunity-radar\",\n  today,\n  Date.now(),\n].join(\"-\");\n\nreturn [\n  {\n    json: {\n      run_id: runId,\n\n      today,\n\n      timezone: \"Asia/Karachi\",\n\n      preferences: {\n        preference_id:\n          cleanString(preference.preference_id) ||\n          \"primary\",\n\n        user_name:\n          cleanString(preference.user_name) ||\n          null,\n\n        email:\n          cleanString(preference.email)\n            .toLowerCase() || null,\n\n        interests,\n\n        opportunity_types: opportunityTypes,\n\n        locations,\n\n        experience_level:\n          cleanString(\n            preference.experience_level\n          ) || null,\n\n        keywords,\n\n        minimum_score: minimumScore,\n\n        reminder_days_before:\n          reminderDaysBefore,\n\n        maximum_results: maximumResults,\n      },\n\n      existing_opportunities:\n        existingOpportunities,\n\n      existing_opportunity_count:\n        existingOpportunities.length,\n\n      research_rules: {\n        return_only_public_opportunities: true,\n\n        prefer_official_sources: true,\n\n        exclude_expired_opportunities: true,\n\n        exclude_existing_urls: true,\n\n        require_source_url: true,\n\n        maximum_new_results:\n          maximumResults,\n      },\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        192,
+        -176
+      ],
+      "id": "e0c576f9-8dd5-405f-8367-4c7384ff0530",
+      "name": "Build Research Context"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Research current opportunities matching this context:\n\n{{ JSON.stringify($json) }}\n\nFollow the system message strictly. Use focused searches, verify official pages with extraction, perform a deadline follow-up search when required, and return no more than the requested maximum number of opportunities in the required JSON structure.",
+        "options": {
+          "systemMessage": "You are an opportunity research agent.\n\nYour job is to discover current, public, relevant opportunities such as hackathons, competitions, conferences, fellowships, internships and research programs.\n\nYour highest priority is finding opportunities that have a clearly stated, currently valid application, registration, submission or participation deadline on an official page.\n\nTOOL USAGE\n\n- Do not ask Search Opportunities to search every interest, opportunity type and location in one query.\n- Use Search Opportunities to discover candidate pages.\n- Use Extract Opportunity Page to verify promising official pages.\n- Follow this process:\n\n  1. Search for relevant opportunities using the supplied interests, preferred locations, opportunity types, current date and experience level.\n  2. Prefer search results whose titles or snippets mention:\n     - application deadline\n     - registration deadline\n     - submission deadline\n     - important dates\n     - call for papers\n     - call for participation\n     - applications open\n     - apply now\n  3. Select a promising official organizer, university, conference, competition, hackathon, fellowship or application page.\n  4. Extract that exact official URL.\n  5. If the extracted page contains a reliable deadline, eligibility and participation information, verify the opportunity.\n  6. If the extracted general page does not contain a deadline, perform a focused search using:\n     \"<opportunity title> official deadline important dates application registration submission\"\n  7. Extract the official deadline, important-dates, application, registration or submission page.\n  8. Combine facts only from successfully extracted official pages belonging to the same opportunity.\n  9. Continue until the requested maximum number of verified opportunities is found or the tool limits are reached.\n\n- Perform no more than three Tavily searches.\n- Attempt no more than four page extractions.\n- Do not stop after the first verified opportunity when the requested maximum number is greater than one.\n- Return no more than the requested maximum number of opportunities.\n- Prefer returning at least one opportunity with a verified deadline when such an opportunity can be found within the search and extraction limits.\n\nSOURCE RULES\n\n- Prefer official organizer, university, conference, competition, hackathon, fellowship, research-program or application pages.\n- Prefer a specific official application, registration, submission, call-for-papers or important-dates page over a general homepage.\n- Do not use social-media posts, search-result pages, reposting sites, generic directories or list articles as final sources when an official page exists.\n- A blog article listing several events is not a verified opportunity source.\n- The final source_url must be a successfully extracted official URL.\n- When several official pages were extracted for the same opportunity, use the most directly useful official application, registration, submission, deadline or important-dates page as source_url.\n- Preserve the exact source URL returned by the extraction tool.\n\nVERIFICATION RULES\n\n- Search-result snippets are discovery evidence only.\n- Never accept an opportunity based only on a search snippet.\n- An opportunity may appear in the final output only when Extract Opportunity Page successfully returns content for at least one official URL belonging to that opportunity.\n- If extraction returns an empty results array, places the URL under failed_results, or reports \"Failed to fetch url\", reject that URL.\n- Do not use facts from a failed extraction.\n- Never claim that a deadline, eligibility rule, organizer, location, participation mode or application status is verified unless it appears in successfully extracted official content.\n- Facts may be combined from multiple successfully extracted official pages belonging to the same opportunity.\n- Use null for factual information that is not present in successfully extracted official content.\n- Do not invent, estimate or infer missing facts.\n- Do not convert an event date into an application deadline.\n- Do not treat the conference start date, program start date or event date as the deadline.\n- Use the deadline that controls application, registration, submission or participation.\n- When several deadlines exist, prefer the next relevant open deadline for the user's participation.\n- Convert an exact verified deadline into YYYY-MM-DD.\n- If only a month, season or vague period is stated, use null.\n- Set deadline_confidence:\n  - high when an exact deadline appears clearly on an official application, registration, submission or important-dates page;\n  - medium when an exact date appears on an official page but its purpose requires limited interpretation;\n  - low when no exact usable deadline is verified.\n\nFALLBACK RULES\n\nIf the first extraction fails:\n\n1. Reject that URL.\n2. Perform one focused search using the opportunity title and:\n   official application registration submission deadline eligibility\n3. Select another official page.\n4. Extract that exact page.\n5. If no official page for that opportunity can be successfully extracted, reject the opportunity.\n\nMANDATORY DEADLINE FOLLOW-UP\n\n- When the first successfully extracted page does not contain an explicit application, registration, submission or participation deadline, you MUST perform one additional focused search before returning the opportunity.\n- Do not return the final JSON immediately after discovering that the deadline is missing.\n- The follow-up search query must contain:\n  \"<exact opportunity title> official application deadline registration deadline important dates\"\n- Extract one official result from that focused search.\n- Only after this second search and extraction may deadline remain null.\n- If tool limits prevent the second search, state this clearly in research_summary.notes.\n\nIf the first extraction succeeds but contains no deadline:\n\n1. Keep the successfully verified basic facts.\n2. Perform one focused search using:\n   \"<opportunity title> official deadline important dates application registration submission\"\n3. Prefer an official Important Dates, Apply, Registration, Submission, Call for Papers or Call for Participation page.\n4. Extract that exact page.\n5. If the second page contains an exact usable deadline, use it.\n6. If no exact deadline is found, use null and deadline_confidence \"low\".\n7. Do not reject an otherwise valid opportunity solely because its deadline is unavailable.\n\nVALIDITY RULES\n\n- Do not accept an opportunity whose relevant application, registration or submission deadline is clearly earlier than the supplied today date.\n- Do not accept an opportunity whose registration, application, submission or participation is clearly closed.\n- If one application round is closed but another future round is explicitly open, use the open round.\n- When no deadline is available, use null and set deadline_confidence to \"low\".\n- Do not return an opportunity when no official page can be successfully extracted.\n- Exclude opportunities already present in existing_opportunities.\n- Prefer opportunities taking place in the current year.\n- Also search the following year when applications, calls for papers or registrations open in advance.\n- Prefer remote, worldwide or preferred-location opportunities.\n- Do not reject a remote opportunity merely because its organizer is located outside the preferred locations.\n\nSEARCH STRATEGY\n\n- Include the current year in every search query.\n- Include the following year when applications or registrations may open early.\n- Each search query must focus on exactly one primary opportunity type.\n- Do not combine hackathon, conference, fellowship, competition, internship and research program in the same search query.\n- Each search query should combine:\n  1. one primary interest,\n  2. one opportunity type,\n  3. one preferred location or Remote,\n  4. one deadline-oriented phrase.\n\n- Good query examples:\n  - \"2026 machine learning hackathon Germany official application deadline\"\n  - \"2026 computer vision conference Europe official call for papers deadline\"\n  - \"2026 bioinformatics fellowship remote official applications open\"\n  - \"2026 AI healthcare research program Europe official application deadline\"\n  - \"2027 generative AI competition remote official registration deadline\"\n\n- Bad query example:\n  \"2026 Machine Learning Computer Vision Bioinformatics Generative AI Hackathon Research Program Conference Competition Pakistan Germany Europe Remote\"\n\n- Use no more than one or two interests per query.\n- Use no more than one opportunity type per query.\n- Use one location preference per query, or use Remote.\n- Prefer queries containing:\n  - official application deadline\n  - official registration deadline\n  - official submission deadline\n  - important dates\n  - applications open\n  - call for papers\n  - call for participation\n\n- For the first search, prioritize one of:\n  - hackathon\n  - fellowship\n  - research program\n  - competition\n  - internship\n\n- For the second search, use a different opportunity type or interest.\n- If a candidate is found but the extracted page has no deadline, the next search must use:\n  \"<exact opportunity title> official application deadline registration deadline important dates\"\n\nSCORING\n\nAssign relevance_score from 0 to 100 using:\n\n- alignment with the supplied interests;\n- acceptable opportunity type;\n- acceptable location or remote participation;\n- experience-level compatibility;\n- whether the opportunity is currently open;\n- deadline validity;\n- deadline availability;\n- source reliability;\n- successful verification from extracted official content.\n\nApply these limits:\n\n- Do not give a result more than 80 when both deadline and eligibility are unknown.\n- Do not give a result more than 75 when most important fields are unknown.\n- Do not give a result more than 60 when it is on-site or hybrid in a location outside the preferred locations.\n- A result with an unverified source must not receive a score or appear in the final opportunities array.\n\nThe relevance score is an internal suitability score and does not guarantee acceptance.\n\nEXTERNAL ACTIONS\n\n- Do not save data to Google Sheets.\n- Do not create Calendar events.\n- Do not send emails.\n- Do not perform any action other than searching, extracting and returning the result.\n\nINTERNAL CONSISTENCY\n\n- Never use an event start date as an application, registration, submission or participation deadline.\n- If deadline is null, recommended_action must not include an exact date.\n- If deadline is null, recommended_action must be:\n  \"Review the official source and verify the application deadline before applying.\"\n- Any exact date mentioned in recommended_action must also appear in the structured deadline field.\n\nOUTPUT\n\nReturn one valid JSON object only.\n\nDo not wrap the JSON in markdown fences.\nDo not include commentary before or after the JSON.\n\nUse this structure:\n\n{\n  \"opportunities\": [\n    {\n      \"title\": \"string\",\n      \"opportunity_type\": \"string\",\n      \"organizer\": \"string or null\",\n      \"location\": \"string or null\",\n      \"participation_mode\": \"Remote, On-site, Hybrid or Unknown\",\n      \"deadline\": \"YYYY-MM-DD or null\",\n      \"eligibility\": \"string or null\",\n      \"relevance_score\": 0,\n      \"why_relevant\": [\n        \"string\"\n      ],\n      \"recommended_action\": \"string\",\n      \"source_url\": \"successfully extracted official URL\",\n      \"source_domain\": \"string or null\",\n      \"deadline_confidence\": \"high, medium or low\",\n      \"verification_status\": \"verified\"\n    }\n  ],\n  \"research_summary\": {\n    \"search_queries\": [\n      \"string\"\n    ],\n    \"searches_used\": 0,\n    \"extractions_attempted\": 0,\n    \"extractions_succeeded\": 0,\n    \"rejected_urls\": [\n      {\n        \"url\": \"string\",\n        \"reason\": \"string\"\n      }\n    ],\n    \"notes\": [\n      \"string\"\n    ]\n  }\n}\n\nIf no official page is successfully extracted, return:\n\n{\n  \"opportunities\": [],\n  \"research_summary\": {\n    \"search_queries\": [],\n    \"searches_used\": 0,\n    \"extractions_attempted\": 0,\n    \"extractions_succeeded\": 0,\n    \"rejected_urls\": [],\n    \"notes\": [\n      \"No opportunity could be verified from a successfully extracted official source.\"\n    ]\n  }\n}",
+          "maxIterations": 8,
+          "returnIntermediateSteps": true,
+          "enableStreaming": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        400,
+        -176
+      ],
+      "id": "b1da0893-f82d-431f-b6c9-39a7571c462f",
+      "name": "AI Opportunity Research Agent"
+    },
+    {
+      "parameters": {
+        "toolDescription": "Search for candidate public opportunity pages. Use a focused query containing one primary interest, one opportunity type, one preferred location or Remote, the current year, and deadline-oriented terms. You may call this tool again when the system message requires a focused deadline follow-up search.",
+        "method": "POST",
+        "url": "https://api.tavily.com/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    query: $fromAI(\n      \"search_query\",\n      \"A focused public web search query for current opportunities. Include the current year, relevant interest, opportunity type, location and words such as application, registration, deadline or eligibility.\",\n      \"string\"\n    ),\n\n    search_depth: \"basic\",\n\n    max_results: 7,\n\n    topic: \"general\",\n\n    include_answer: false,\n\n    include_raw_content: false,\n\n    include_images: false,\n\n    include_image_descriptions: false,\n\n    include_favicon: false,\n\n    include_usage: true\n  }\n}}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        400,
+        144
+      ],
+      "id": "2d9b2f92-3ffb-4b35-8199-59e9bc0b39d4",
+      "name": "Search Opportunities"
+    },
+    {
+      "parameters": {
+        "toolDescription": "Extract one exact official URL copied from search results. Use it to verify the opportunity, deadline, eligibility, organizer, location, participation mode, and open or closed status. You may call this tool again for an official deadline, important-dates, application, registration, or submission page when required.",
+        "method": "POST",
+        "url": "https://api.tavily.com/extract",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    urls: [\n      $fromAI(\n        \"opportunity_url\",\n        \"One exact official opportunity, application, deadline, registration, submission or important-dates URL copied from Search Opportunities results.\",\n        \"string\"\n      )\n    ],\n    query: \"Find the exact application, registration, submission or participation deadline, important dates, current open or closed status, title, organizer, eligibility, location, participation mode and application instructions. Distinguish application or submission deadlines from the event start date.\",\n    chunks_per_source: 2,\n    extract_depth: \"basic\",\n    include_images: false,\n    format: \"markdown\",\n    timeout: 30\n  }\n}}",
+        "options": {
+          "timeout": 40000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.4,
+      "position": [
+        592,
+        80
+      ],
+      "id": "8a239e37-473d-46d3-9fb7-aaa776c2231e",
+      "name": "Extract Opportunity Page"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are a strict data-formatting component.\n\nConvert the supplied opportunity research output into the required structured format.\n\nYou are not performing new research.\n\nRULES\n\n- Use only facts already present in the Agent research output.\n- Do not invent opportunities or factual details.\n- Do not search for additional information.\n- Do not infer missing information from titles, URLs, organizer names or general knowledge.\n- Do not change, shorten, expand or replace source URLs.\n- Preserve the exact opportunity source URL supplied by the Agent.\n- Do not manufacture deadlines, organizers, eligibility, locations, participation modes or application status.\n- Use null when factual information is missing.\n\nVERIFICATION RULES\n\n- Include only opportunities that contain a usable public HTTP or HTTPS source URL.\n- Include an opportunity only when the Agent output indicates that at least one official page for that opportunity was successfully extracted or verified.\n- Treat verification_status equal to \"verified\" as successful verification.\n- If the opportunity has no verification_status, use the Agent research summary and extracted-page evidence to determine whether verification succeeded.\n- If extraction failed, returned no content, or the opportunity source URL appears in rejected_urls, failed_results or any failed-extraction list, exclude that opportunity.\n- Do not include opportunities that rely only on search-result snippets.\n- Do not include opportunities that the Agent explicitly identified as closed, expired or unavailable.\n- Do not include an opportunity when its source page was not successfully extracted.\n- Do not change verification_status values supplied by the Agent.\n\nDEADLINE RULES\n\n- Preserve an exact verified deadline supplied by the Agent.\n- Do not replace a valid Agent deadline with null.\n- Convert an exact stated deadline into YYYY-MM-DD.\n- The deadline must represent an application, registration, submission or participation deadline.\n- Do not treat an event date, conference date, program start date or event start date as a deadline.\n- If the deadline cannot safely be converted into YYYY-MM-DD, use null.\n- If only a month, season, date range or vague period is stated, use null.\n- Preserve deadline_confidence from the Agent.\n- If the Agent provides deadline_confidence as \"high\" or \"medium\", preserve it when the deadline is valid.\n- If deadline is null or invalid, set deadline_confidence to \"low\".\n- Do not upgrade deadline_confidence beyond the Agent's supplied value.\n- Do not create a deadline from research-summary notes unless the Agent explicitly identified it as the opportunity deadline.\n- If deadline is null, remove any exact date from recommended_action.\n- If deadline is null, set recommended_action to:\n  \"Review the official source and verify the application deadline before applying.\"\n- Never convert an event start date or event end date into a deadline.\n- Do not preserve a recommended_action that contradicts the structured deadline field.\n\nSCORING RULES\n\n- relevance_score must be a whole number from 0 to 100.\n- Do not increase the Agent's relevance_score.\n- Preserve the Agent's relevance_score unless the rules below require reducing it.\n- If organizer, deadline, eligibility, location and participation mode are mostly unknown, cap relevance_score at 75.\n- If deadline and eligibility are both unknown, cap relevance_score at 80.\n- If the opportunity is on-site or hybrid in a location outside the preferred locations, cap relevance_score at 60.\n- A missing deadline alone does not require excluding an otherwise verified opportunity.\n- A low deadline confidence alone does not require excluding an otherwise verified opportunity.\n\nLOCATION AND PARTICIPATION RULES\n\n- Preserve the Agent's location and participation mode.\n- Use null for location when it is not verified.\n- participation_mode must be one of:\n  - Remote\n  - On-site\n  - Hybrid\n  - Unknown\n- Use Unknown when participation mode is not verified.\n- Do not infer Remote from the presence of an online application form.\n- Do not infer On-site solely from the organizer's address.\n\nCONTENT RULES\n\n- why_relevant must contain short factual reasons based only on the Agent output.\n- Preserve why_relevant reasons when they are factual.\n- Remove unsupported or promotional claims.\n- recommended_action must be based only on the Agent output.\n- Do not tell the user to register, apply or submit when the Agent indicates that applications are closed.\n- organizer, eligibility and location must use null when absent.\n- source_domain must match the hostname of source_url when it is already supplied by the Agent.\n- Do not invent source_domain when the source URL is invalid.\n\nRESEARCH SUMMARY MAPPING\n\nConvert the Agent research_summary into the formatter research_summary structure.\n\nUse these mappings:\n\n- search_queries:\n  Preserve research_summary.search_queries.\n  If absent, use an empty array.\n\n- pages_extracted:\n  Use research_summary.extractions_succeeded when available.\n  Otherwise use research_summary.pages_extracted.\n  If neither is available, use 0.\n\n- results_rejected:\n  If research_summary.rejected_urls is an array, use its number of entries.\n  Otherwise use research_summary.results_rejected.\n  If neither is available, use 0.\n\n- notes:\n  Preserve research_summary.notes.\n  If absent, use an empty array.\n\nDo not invent search queries, extraction counts, rejection counts or notes.\n\nOUTPUT LIMITS\n\n- Return no more than the maximum results specified in the run context.\n- When more opportunities are supplied than the maximum, retain the highest-scoring verified opportunities.\n- Do not include explanatory text outside the required structured output.\n- Return only data that matches the connected Structured Output Parser schema.\n\nRUN CONTEXT:\n\n{{ JSON.stringify($(\"Build Research Context\").first().json, null, 2) }}\n\nAGENT RESEARCH OUTPUT:\n\n{{ typeof $json.output === \"string\" ? $json.output : JSON.stringify($json.output ?? $json, null, 2) }}",
+        "hasOutputParser": true,
+        "batching": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        784,
+        -176
+      ],
+      "id": "c0c51289-b72d-488e-8f3a-e3416f5541d1",
+      "name": "Normalize Opportunity Results"
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"$schema\": \"http://json-schema.org/draft-07/schema#\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"opportunities\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"additionalProperties\": false,\n        \"properties\": {\n          \"title\": {\n            \"type\": \"string\"\n          },\n          \"opportunity_type\": {\n            \"type\": \"string\"\n          },\n          \"organizer\": {\n            \"type\": [\n              \"string\",\n              \"null\"\n            ]\n          },\n          \"location\": {\n            \"type\": [\n              \"string\",\n              \"null\"\n            ]\n          },\n          \"participation_mode\": {\n            \"type\": \"string\",\n            \"enum\": [\n              \"Remote\",\n              \"On-site\",\n              \"Hybrid\",\n              \"Unknown\"\n            ]\n          },\n          \"deadline\": {\n            \"type\": [\n              \"string\",\n              \"null\"\n            ],\n            \"pattern\": \"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\"\n          },\n          \"eligibility\": {\n            \"type\": [\n              \"string\",\n              \"null\"\n            ]\n          },\n          \"relevance_score\": {\n            \"type\": \"integer\",\n            \"minimum\": 0,\n            \"maximum\": 100\n          },\n          \"why_relevant\": {\n            \"type\": \"array\",\n            \"items\": {\n              \"type\": \"string\"\n            },\n            \"minItems\": 1,\n            \"maxItems\": 5\n          },\n          \"recommended_action\": {\n            \"type\": \"string\"\n          },\n          \"source_url\": {\n            \"type\": \"string\"\n          },\n          \"source_domain\": {\n            \"type\": [\n              \"string\",\n              \"null\"\n            ]\n          },\n          \"deadline_confidence\": {\n            \"type\": \"string\",\n            \"enum\": [\n              \"high\",\n              \"medium\",\n              \"low\"\n            ]\n          }\n        },\n        \"required\": [\n          \"title\",\n          \"opportunity_type\",\n          \"organizer\",\n          \"location\",\n          \"participation_mode\",\n          \"deadline\",\n          \"eligibility\",\n          \"relevance_score\",\n          \"why_relevant\",\n          \"recommended_action\",\n          \"source_url\",\n          \"source_domain\",\n          \"deadline_confidence\"\n        ]\n      }\n    },\n    \"research_summary\": {\n      \"type\": \"object\",\n      \"additionalProperties\": false,\n      \"properties\": {\n        \"search_queries\": {\n          \"type\": \"array\",\n          \"items\": {\n            \"type\": \"string\"\n          }\n        },\n        \"pages_extracted\": {\n          \"type\": \"integer\",\n          \"minimum\": 0\n        },\n        \"results_rejected\": {\n          \"type\": \"integer\",\n          \"minimum\": 0\n        },\n        \"notes\": {\n          \"type\": \"array\",\n          \"items\": {\n            \"type\": \"string\"\n          }\n        }\n      },\n      \"required\": [\n        \"search_queries\",\n        \"pages_extracted\",\n        \"results_rejected\",\n        \"notes\"\n      ]\n    }\n  },\n  \"required\": [\n    \"opportunities\",\n    \"research_summary\"\n  ]\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        928,
+        -384
+      ],
+      "id": "4493db9b-640b-4679-b719-5ec527a0ef66",
+      "name": "Opportunity Output Parser"
+    },
+    {
+      "parameters": {
+        "model": "nvidia/nemotron-nano-9b-v2:free",
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        272,
+        32
+      ],
+      "id": "1e96ad94-24db-471f-963a-79ae296347bb",
+      "name": "OpenRouter Chat Model"
+    },
+    {
+      "parameters": {
+        "model": "nvidia/nemotron-nano-9b-v2:free",
+        "options": {
+          "temperature": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        784,
+        -384
+      ],
+      "id": "a593f6e8-f6de-4136-b3ba-e2c08f192c50",
+      "name": "OpenRouter Chat Model1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const formatterResult =\n  $input.first()?.json ?? {};\n\nconst context =\n  $(\"Build Research Context\").first()?.json ?? {};\n\nfunction cleanString(value) {\n  return String(value ?? \"\")\n    // Remove invisible zero-width characters that can\n    // quietly break otherwise valid URLs and comparisons.\n    .replace(/[\\u200B-\\u200D\\uFEFF]/g, \"\")\n    .replace(/\\s+/g, \" \")\n    .trim();\n}\n\nfunction normalizeText(value) {\n  return cleanString(value)\n    .toLowerCase()\n    .replace(/&/g, \" and \")\n    .replace(/[^a-z0-9]+/g, \" \")\n    .replace(/\\s+/g, \" \")\n    .trim();\n}\n\nfunction parseFormatterOutput(value) {\n  let parsed = value;\n\n  // Some n8n versions place the parsed object\n  // inside an \"output\" property.\n  while (\n    parsed &&\n    typeof parsed === \"object\" &&\n    parsed.output !== undefined &&\n    !Array.isArray(parsed.opportunities)\n  ) {\n    parsed = parsed.output;\n  }\n\n  if (typeof parsed === \"string\") {\n    const cleaned = parsed\n      .replace(/^```(?:json)?\\s*/i, \"\")\n      .replace(/\\s*```$/i, \"\")\n      .trim();\n\n    try {\n      parsed = JSON.parse(cleaned);\n    } catch (error) {\n      throw new Error(\n        `Could not parse the formatter result as JSON: ${error.message}`\n      );\n    }\n  }\n\n  if (\n    !parsed ||\n    typeof parsed !== \"object\" ||\n    !Array.isArray(parsed.opportunities)\n  ) {\n    throw new Error(\n      'The formatter result does not contain an \"opportunities\" array.'\n    );\n  }\n\n  return parsed;\n}\n\nfunction sanitizeUrlInput(value) {\n  let raw = cleanString(value);\n\n  if (!raw) {\n    return \"\";\n  }\n\n  // Support a URL accidentally returned as:\n  // <https://example.com>\n  // \"https://example.com\"\n  // `https://example.com`\n  raw = raw\n    .replace(/^[\"'`<]+/, \"\")\n    .replace(/[\"'`>]+$/, \"\")\n    .trim();\n\n  // Support a Markdown URL:\n  // [Official page](https://example.com)\n  const markdownMatch = raw.match(\n    /^\\[[^\\]]*]\\((https?:\\/\\/[^)]+)\\)$/i\n  );\n\n  if (markdownMatch) {\n    raw = markdownMatch[1];\n  }\n\n  return raw.trim();\n}\n\nfunction normalizeUrl(value) {\n  const raw = sanitizeUrlInput(value);\n\n  if (!raw) {\n    return null;\n  }\n\n  // Basic public HTTP/HTTPS validation.\n  if (!/^https?:\\/\\/[^\\s]+$/i.test(raw)) {\n    return null;\n  }\n\n  /*\n   * Use the standard URL parser when available.\n   * Some restricted n8n Code environments may not\n   * expose it, so manual parsing exists below.\n   */\n  try {\n    if (typeof URL !== \"undefined\") {\n      const url = new URL(raw);\n\n      if (\n        url.protocol !== \"http:\" &&\n        url.protocol !== \"https:\"\n      ) {\n        return null;\n      }\n\n      url.protocol =\n        url.protocol.toLowerCase();\n\n      url.hostname =\n        url.hostname.toLowerCase();\n\n      url.hash = \"\";\n\n      const removableParameters = [\n        \"fbclid\",\n        \"gclid\",\n        \"ref\",\n        \"source\"\n      ];\n\n      for (\n        const key of\n        [...url.searchParams.keys()]\n      ) {\n        const normalizedKey =\n          key.toLowerCase();\n\n        if (\n          normalizedKey.startsWith(\"utm_\") ||\n          removableParameters.includes(\n            normalizedKey\n          )\n        ) {\n          url.searchParams.delete(key);\n        }\n      }\n\n      url.searchParams.sort();\n\n      return url\n        .toString()\n        .replace(/\\/$/, \"\");\n    }\n  } catch {\n    // Fall through to manual parsing.\n  }\n\n  /*\n   * Manual fallback for n8n environments where\n   * the standard URL constructor is unavailable.\n   */\n  const withoutHash =\n    raw.split(\"#\")[0];\n\n  const match = withoutHash.match(\n    /^(https?):\\/\\/([^/?#\\s]+)([^?#\\s]*)?(?:\\?([^#\\s]*))?$/i\n  );\n\n  if (!match) {\n    return null;\n  }\n\n  const protocol =\n    match[1].toLowerCase();\n\n  const hostname =\n    match[2].toLowerCase();\n\n  let pathname =\n    match[3] || \"\";\n\n  if (pathname === \"/\") {\n    pathname = \"\";\n  } else {\n    pathname = pathname.replace(\n      /\\/$/,\n      \"\"\n    );\n  }\n\n  const removableParameters =\n    new Set([\n      \"fbclid\",\n      \"gclid\",\n      \"ref\",\n      \"source\"\n    ]);\n\n  const queryParts =\n    (match[4] || \"\")\n      .split(\"&\")\n      .filter(Boolean)\n      .filter((part) => {\n        const rawKey =\n          part.split(\"=\")[0] || \"\";\n\n        let key;\n\n        try {\n          key = decodeURIComponent(\n            rawKey\n          ).toLowerCase();\n        } catch {\n          key = rawKey.toLowerCase();\n        }\n\n        return (\n          !key.startsWith(\"utm_\") &&\n          !removableParameters.has(key)\n        );\n      })\n      .sort();\n\n  const query =\n    queryParts.length > 0\n      ? `?${queryParts.join(\"&\")}`\n      : \"\";\n\n  return `${protocol}://${hostname}${pathname}${query}`;\n}\n\nfunction getDomain(value) {\n  const normalized =\n    normalizeUrl(value);\n\n  if (!normalized) {\n    return null;\n  }\n\n  const match = normalized.match(\n    /^https?:\\/\\/([^/?#]+)/i\n  );\n\n  if (!match) {\n    return null;\n  }\n\n  return match[1]\n    .toLowerCase()\n    .replace(/^www\\./, \"\");\n}\n\nfunction validateISODate(value, today) {\n  const dateText = cleanString(value);\n\n  if (!dateText) {\n    return {\n      value: null,\n      valid: true,\n      expired: false\n    };\n  }\n\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(dateText)) {\n    return {\n      value: null,\n      valid: false,\n      expired: false\n    };\n  }\n\n  const [year, month, day] = dateText\n    .split(\"-\")\n    .map(Number);\n\n  const parsedDate = new Date(\n    Date.UTC(year, month - 1, day)\n  );\n\n  const isRealDate =\n    parsedDate.getUTCFullYear() === year &&\n    parsedDate.getUTCMonth() === month - 1 &&\n    parsedDate.getUTCDate() === day;\n\n  if (!isRealDate) {\n    return {\n      value: null,\n      valid: false,\n      expired: false\n    };\n  }\n\n  return {\n    value: dateText,\n    valid: true,\n    expired:\n      Boolean(today) &&\n      dateText < today\n  };\n}\n\nfunction canonicalOpportunityType(value) {\n  const type = normalizeText(value);\n\n  const mappings = {\n    hackathon: \"hackathon\",\n    hackathons: \"hackathon\",\n\n    competition: \"competition\",\n    competitions: \"competition\",\n    challenge: \"competition\",\n    challenges: \"competition\",\n\n    conference: \"conference\",\n    conferences: \"conference\",\n\n    \"research programme\": \"research program\",\n    \"research programmes\": \"research program\",\n    \"research program\": \"research program\",\n    \"research programs\": \"research program\",\n\n    fellowship: \"fellowship\",\n    fellowships: \"fellowship\",\n\n    internship: \"internship\",\n    internships: \"internship\"\n  };\n\n  return mappings[type] ?? type;\n}\n\nfunction canonicalParticipationMode(value) {\n  const mode = normalizeText(value);\n\n  if (\n    mode.includes(\"remote\") ||\n    mode.includes(\"online\") ||\n    mode.includes(\"virtual\")\n  ) {\n    return \"Remote\";\n  }\n\n  if (mode.includes(\"hybrid\")) {\n    return \"Hybrid\";\n  }\n\n  if (\n    mode.includes(\"on site\") ||\n    mode.includes(\"onsite\") ||\n    mode.includes(\"in person\")\n  ) {\n    return \"On-site\";\n  }\n\n  return \"Unknown\";\n}\n\nfunction canonicalConfidence(value) {\n  const confidence =\n    normalizeText(value);\n\n  if (\n    confidence === \"high\" ||\n    confidence === \"medium\" ||\n    confidence === \"low\"\n  ) {\n    return confidence;\n  }\n\n  return \"low\";\n}\n\nfunction cleanStringArray(value) {\n  const input = Array.isArray(value)\n    ? value\n    : cleanString(value).split(\n        /[|;\\n]/\n      );\n\n  return [\n    ...new Map(\n      input\n        .map(cleanString)\n        .filter(Boolean)\n        .map((entry) => [\n          normalizeText(entry),\n          entry\n        ])\n    ).values()\n  ];\n}\n\nfunction stableHash(value) {\n  let hash = 2166136261;\n\n  for (\n    let index = 0;\n    index < value.length;\n    index += 1\n  ) {\n    hash ^= value.charCodeAt(index);\n    hash = Math.imul(\n      hash,\n      16777619\n    );\n  }\n\n  return (hash >>> 0)\n    .toString(16)\n    .padStart(8, \"0\");\n}\n\nfunction titleOrganizerKey(\n  title,\n  organizer\n) {\n  const normalizedTitle =\n    normalizeText(title);\n\n  const normalizedOrganizer =\n    normalizeText(organizer);\n\n  if (\n    !normalizedTitle ||\n    !normalizedOrganizer\n  ) {\n    return null;\n  }\n\n  return (\n    `${normalizedTitle}|` +\n    normalizedOrganizer\n  );\n}\n\nfunction appearsLocationRelevant(\n  location,\n  participationMode,\n  preferredLocations\n) {\n  const normalizedPreferences =\n    preferredLocations\n      .map(normalizeText)\n      .filter(Boolean);\n\n  // No location restrictions are available.\n  if (\n    normalizedPreferences.length === 0\n  ) {\n    return null;\n  }\n\n  // Remote opportunities are acceptable when\n  // Remote or Worldwide is in the preferences.\n  if (\n    participationMode === \"Remote\" &&\n    normalizedPreferences.some(\n      (entry) =>\n        entry === \"remote\" ||\n        entry === \"worldwide\"\n    )\n  ) {\n    return true;\n  }\n\n  const normalizedLocation =\n    normalizeText(location);\n\n  if (!normalizedLocation) {\n    return null;\n  }\n\n  const directMatch =\n    normalizedPreferences.some(\n      (preference) =>\n        preference !== \"remote\" &&\n        (\n          normalizedLocation.includes(\n            preference\n          ) ||\n          preference.includes(\n            normalizedLocation\n          )\n        )\n    );\n\n  if (directMatch) {\n    return true;\n  }\n\n  // Treat individual European countries as matching\n  // the broader Europe preference.\n  if (\n    normalizedPreferences.includes(\n      \"europe\"\n    )\n  ) {\n    const europeanLocations = [\n      \"albania\",\n      \"andorra\",\n      \"austria\",\n      \"belarus\",\n      \"belgium\",\n      \"bosnia\",\n      \"bulgaria\",\n      \"croatia\",\n      \"cyprus\",\n      \"czech\",\n      \"denmark\",\n      \"estonia\",\n      \"finland\",\n      \"france\",\n      \"germany\",\n      \"greece\",\n      \"hungary\",\n      \"iceland\",\n      \"ireland\",\n      \"italy\",\n      \"kosovo\",\n      \"latvia\",\n      \"liechtenstein\",\n      \"lithuania\",\n      \"luxembourg\",\n      \"malta\",\n      \"moldova\",\n      \"monaco\",\n      \"montenegro\",\n      \"netherlands\",\n      \"north macedonia\",\n      \"norway\",\n      \"poland\",\n      \"portugal\",\n      \"romania\",\n      \"san marino\",\n      \"serbia\",\n      \"slovakia\",\n      \"slovenia\",\n      \"spain\",\n      \"sweden\",\n      \"switzerland\",\n      \"ukraine\",\n      \"united kingdom\",\n      \"england\",\n      \"scotland\",\n      \"wales\",\n      \"europe\"\n    ];\n\n    if (\n      europeanLocations.some(\n        (entry) =>\n          normalizedLocation.includes(\n            entry\n          )\n      )\n    ) {\n      return true;\n    }\n  }\n\n  return false;\n}\n\nconst parsed =\n  parseFormatterOutput(\n    formatterResult\n  );\n\nconst rawOpportunities =\n  parsed.opportunities;\n\nconst researchSummary =\n  parsed.research_summary ?? {\n    search_queries: [],\n    pages_extracted: 0,\n    results_rejected: 0,\n    notes: []\n  };\n\nconst today =\n  cleanString(context.today);\n\nconst minimumScore =\n  Number(\n    context.preferences\n      ?.minimum_score ?? 70\n  );\n\nconst maximumResults =\n  Number(\n    context.preferences\n      ?.maximum_results ?? 5\n  );\n\nconst preferredLocations =\n  Array.isArray(\n    context.preferences?.locations\n  )\n    ? context.preferences.locations\n    : [];\n\nconst allowedTypes = new Set(\n  (\n    Array.isArray(\n      context.preferences\n        ?.opportunity_types\n    )\n      ? context.preferences\n          .opportunity_types\n      : []\n  ).map(canonicalOpportunityType)\n);\n\n// Build sets from previously saved opportunities.\nconst existingUrls = new Set();\n\nconst existingTitleOrganizerKeys =\n  new Set();\n\nfor (\n  const existing of\n    context.existing_opportunities ?? []\n) {\n  const normalizedExistingUrl =\n    normalizeUrl(\n      existing.normalized_url ||\n      existing.source_url\n    );\n\n  if (normalizedExistingUrl) {\n    existingUrls.add(\n      normalizedExistingUrl\n    );\n  }\n\n  const existingKey =\n    titleOrganizerKey(\n      existing.title,\n      existing.organizer\n    );\n\n  if (existingKey) {\n    existingTitleOrganizerKeys.add(\n      existingKey\n    );\n  }\n}\n\nconst blockedDomains = [\n  \"facebook.com\",\n  \"instagram.com\",\n  \"linkedin.com\",\n  \"pinterest.com\",\n  \"tiktok.com\",\n  \"twitter.com\",\n  \"x.com\",\n  \"youtube.com\"\n];\n\n// Validate higher-scoring results first.\nconst candidates =\n  rawOpportunities\n    .map((opportunity) => ({\n      ...opportunity,\n      relevance_score:\n        Number(\n          opportunity.relevance_score\n        )\n    }))\n    .sort(\n      (first, second) =>\n        Number(\n          second.relevance_score || 0\n        ) -\n        Number(\n          first.relevance_score || 0\n        )\n    );\n\nconst seenRunUrls = new Set();\nconst seenRunKeys = new Set();\n\nconst outputItems = [];\n\nlet acceptedCount = 0;\n\nfor (const opportunity of candidates) {\n  const rejectionReasons = [];\n  const warnings = [];\n\n  const title =\n    cleanString(\n      opportunity.title\n    );\n\n  const organizer =\n    cleanString(\n      opportunity.organizer\n    ) || null;\n\n  const opportunityType =\n    canonicalOpportunityType(\n      opportunity.opportunity_type\n    );\n\n  const sourceUrl =\n    sanitizeUrlInput(\n      opportunity.source_url\n    );\n\n  const normalizedUrl =\n    normalizeUrl(sourceUrl);\n\n  const sourceDomain =\n    normalizedUrl\n      ? getDomain(normalizedUrl)\n      : null;\n\n  const originalRelevanceScore =\n    Number(\n      opportunity.relevance_score\n    );\n\n  const dateResult =\n    validateISODate(\n      opportunity.deadline,\n      today\n    );\n\n  const participationMode =\n    canonicalParticipationMode(\n      opportunity.participation_mode\n    );\n\n  const eligibility =\n    cleanString(\n      opportunity.eligibility\n    ) || null;\n\n  const location =\n    cleanString(\n      opportunity.location\n    ) || null;\n\n  const whyRelevant =\n    cleanStringArray(\n      opportunity.why_relevant\n    );\n\n  const duplicateKey =\n    titleOrganizerKey(\n      title,\n      organizer\n    );\n\n  const locationRelevant =\n    appearsLocationRelevant(\n      location,\n      participationMode,\n      preferredLocations\n    );\n\n  /*\n   * Deterministic score adjustment.\n   * An incomplete record should not keep a heroic\n   * score merely because an LLM felt generous.\n   */\n  let adjustedRelevanceScore =\n    originalRelevanceScore;\n\n  if (\n    Number.isFinite(\n      adjustedRelevanceScore\n    )\n  ) {\n    const importantUnknownCount = [\n      organizer,\n      dateResult.value,\n      eligibility,\n      location,\n      participationMode === \"Unknown\"\n        ? null\n        : participationMode\n    ].filter(\n      (value) => !value\n    ).length;\n\n    // Most important fields are unknown.\n    if (\n      importantUnknownCount >= 4\n    ) {\n      adjustedRelevanceScore =\n        Math.min(\n          adjustedRelevanceScore,\n          75\n        );\n    }\n\n    // Both deadline and eligibility are unknown.\n    if (\n      !dateResult.value &&\n      !eligibility\n    ) {\n      adjustedRelevanceScore =\n        Math.min(\n          adjustedRelevanceScore,\n          80\n        );\n    }\n\n    // Non-remote opportunity outside the\n    // preferred locations.\n    if (\n      locationRelevant === false &&\n      participationMode !== \"Remote\"\n    ) {\n      adjustedRelevanceScore =\n        Math.min(\n          adjustedRelevanceScore,\n          60\n        );\n    }\n  }\n\n  if (!title) {\n    rejectionReasons.push(\n      \"missing_title\"\n    );\n  }\n\n  if (!normalizedUrl) {\n    rejectionReasons.push(\n      \"missing_or_invalid_source_url\"\n    );\n  }\n\n  if (\n    sourceDomain &&\n    blockedDomains.some(\n      (blocked) =>\n        sourceDomain === blocked ||\n        sourceDomain.endsWith(\n          `.${blocked}`\n        )\n    )\n  ) {\n    rejectionReasons.push(\n      \"social_media_source\"\n    );\n  }\n\n  if (\n    !Number.isFinite(\n      adjustedRelevanceScore\n    )\n  ) {\n    rejectionReasons.push(\n      \"invalid_relevance_score\"\n    );\n  } else if (\n    adjustedRelevanceScore <\n    minimumScore\n  ) {\n    rejectionReasons.push(\n      \"score_below_threshold\"\n    );\n  }\n\n  if (\n    allowedTypes.size > 0 &&\n    !allowedTypes.has(\n      opportunityType\n    )\n  ) {\n    rejectionReasons.push(\n      \"opportunity_type_not_allowed\"\n    );\n  }\n\n  if (!dateResult.valid) {\n    rejectionReasons.push(\n      \"invalid_deadline_format\"\n    );\n  }\n\n  if (dateResult.expired) {\n    rejectionReasons.push(\n      \"deadline_expired\"\n    );\n  }\n\n  if (\n    normalizedUrl &&\n    existingUrls.has(\n      normalizedUrl\n    )\n  ) {\n    rejectionReasons.push(\n      \"duplicate_existing_url\"\n    );\n  }\n\n  if (\n    duplicateKey &&\n    existingTitleOrganizerKeys.has(\n      duplicateKey\n    )\n  ) {\n    rejectionReasons.push(\n      \"duplicate_existing_title_and_organizer\"\n    );\n  }\n\n  if (\n    normalizedUrl &&\n    seenRunUrls.has(\n      normalizedUrl\n    )\n  ) {\n    rejectionReasons.push(\n      \"duplicate_in_current_run_url\"\n    );\n  }\n\n  if (\n    duplicateKey &&\n    seenRunKeys.has(\n      duplicateKey\n    )\n  ) {\n    rejectionReasons.push(\n      \"duplicate_in_current_run_title_and_organizer\"\n    );\n  }\n\n  if (\n    whyRelevant.length === 0\n  ) {\n    rejectionReasons.push(\n      \"missing_relevance_reasons\"\n    );\n  }\n\n  // Reject an on-site or hybrid opportunity in\n  // a clearly disallowed location.\n  if (\n    locationRelevant === false\n  ) {\n    rejectionReasons.push(\n      \"location_not_allowed\"\n    );\n  }\n\n  if (!dateResult.value) {\n    warnings.push(\n      \"deadline_not_verified\"\n    );\n  }\n\n  if (!organizer) {\n    warnings.push(\n      \"organizer_not_verified\"\n    );\n  }\n\n  if (!eligibility) {\n    warnings.push(\n      \"eligibility_not_verified\"\n    );\n  }\n\n  if (!location) {\n    warnings.push(\n      \"location_not_verified\"\n    );\n  }\n\n  if (\n    participationMode === \"Unknown\"\n  ) {\n    warnings.push(\n      \"participation_mode_not_verified\"\n    );\n  }\n\n  if (\n    rejectionReasons.length === 0 &&\n    acceptedCount >= maximumResults\n  ) {\n    rejectionReasons.push(\n      \"maximum_results_exceeded\"\n    );\n  }\n\n  const accepted =\n    rejectionReasons.length === 0;\n\n  if (accepted) {\n    acceptedCount += 1;\n\n    if (normalizedUrl) {\n      seenRunUrls.add(\n        normalizedUrl\n      );\n    }\n\n    if (duplicateKey) {\n      seenRunKeys.add(\n        duplicateKey\n      );\n    }\n  }\n\n  const identitySource =\n    normalizedUrl ||\n    duplicateKey ||\n    `${title}|${sourceUrl}`;\n\n  outputItems.push({\n    json: {\n      record_type:\n        \"opportunity\",\n\n      accepted,\n\n      validation_status:\n        accepted\n          ? \"accepted\"\n          : \"rejected\",\n\n      rejection_reasons:\n        rejectionReasons,\n\n      validation_warnings:\n        warnings,\n\n      opportunity_id:\n        `opp_${stableHash(\n          identitySource\n        )}`,\n\n      discovered_at:\n        new Date().toISOString(),\n\n      title,\n\n      opportunity_type:\n        cleanString(\n          opportunity.opportunity_type\n        ) || opportunityType,\n\n      organizer,\n\n      location,\n\n      participation_mode:\n        participationMode,\n\n      deadline:\n        dateResult.value,\n\n      eligibility,\n\n      relevance_score:\n        Number.isFinite(\n          adjustedRelevanceScore\n        )\n          ? Math.min(\n              Math.max(\n                Math.round(\n                  adjustedRelevanceScore\n                ),\n                0\n              ),\n              100\n            )\n          : 0,\n\n      original_relevance_score:\n        Number.isFinite(\n          originalRelevanceScore\n        )\n          ? Math.min(\n              Math.max(\n                Math.round(\n                  originalRelevanceScore\n                ),\n                0\n              ),\n              100\n            )\n          : null,\n\n      why_relevant:\n        whyRelevant.join(\" | \"),\n\n      why_relevant_list:\n        whyRelevant,\n\n      recommended_action:\n        cleanString(\n          opportunity.recommended_action\n        ) ||\n        \"Review the official source.\",\n\n      source_url:\n        sourceUrl || null,\n\n      normalized_url:\n        normalizedUrl,\n\n      source_domain:\n        sourceDomain,\n\n      deadline_confidence:\n        canonicalConfidence(\n          opportunity.deadline_confidence\n        ),\n\n      calendar_created:\n        false,\n\n      status:\n        accepted\n          ? \"new\"\n          : \"rejected\",\n\n      research_summary:\n        researchSummary\n    }\n  });\n}\n\n// Preserve a result when the Agent found nothing.\nif (outputItems.length === 0) {\n  return [\n    {\n      json: {\n        record_type:\n          \"run_summary\",\n\n        accepted:\n          false,\n\n        validation_status:\n          \"no_opportunities_found\",\n\n        rejection_reasons: [\n          \"The research Agent returned no opportunities.\"\n        ],\n\n        validation_warnings:\n          [],\n\n        research_summary:\n          researchSummary\n      }\n    }\n  ];\n}\n\nreturn outputItems;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        -176
+      ],
+      "id": "c587aa67-0c6e-4c3d-bd0f-10cb91d3be29",
+      "name": "Validate and Deduplicate"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "600c97e7-4b1f-4a8a-a520-83997487a2af",
+              "leftValue": "={{ $json.accepted }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1600,
+        -64
+      ],
+      "id": "87536b67-c48e-44a4-8dce-3324a2d15626",
+      "name": "Is Accepted?"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "AI Opportunity Radar"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Opportunities",
+          "mode": "list",
+          "cachedResultName": "Opportunities"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "normalized_url"
+          ],
+          "schema": [
+            {
+              "id": "opportunity_id",
+              "displayName": "opportunity_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "discovered_at",
+              "displayName": "discovered_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "opportunity_type",
+              "displayName": "opportunity_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "organizer",
+              "displayName": "organizer",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "location",
+              "displayName": "location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "participation_mode",
+              "displayName": "participation_mode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "deadline",
+              "displayName": "deadline",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "eligibility",
+              "displayName": "eligibility",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "relevance_score",
+              "displayName": "relevance_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "why_relevant",
+              "displayName": "why_relevant",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "recommended_action",
+              "displayName": "recommended_action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "source_url",
+              "displayName": "source_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "normalized_url",
+              "displayName": "normalized_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "source_domain",
+              "displayName": "source_domain",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "deadline_confidence",
+              "displayName": "deadline_confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "calendar_created",
+              "displayName": "calendar_created",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1808,
+        -128
+      ],
+      "id": "d98b0e20-dfbf-487b-be92-1b98543770b7",
+      "name": "Save Opportunity"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1392,
+        -160
+      ],
+      "id": "f3d2fa7b-abc2-4928-8dee-b620c1be0d71",
+      "name": "Loop Through Results"
+    },
+    {
+      "parameters": {
+        "jsCode": "return {\n  json: {\n    ...$json,\n\n    action_status: \"rejected\",\n\n    calendar_created: false,\n\n    calendar_event_id: null,\n\n    calendar_event_link: null,\n\n    reminder_date: null\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        112
+      ],
+      "id": "2d2df0f3-c007-4671-a6c8-89eb81f2601c",
+      "name": "Finalize Rejected Result"
+    },
+    {
+      "parameters": {
+        "jsCode": "const savedRow = $json ?? {};\n\nconst original =\n  $(\"Loop Through Results\").item?.json ?? {};\n\nconst context =\n  $(\"Build Research Context\").first()?.json ?? {};\n\nfunction cleanString(value) {\n  return String(value ?? \"\")\n    .replace(/\\s+/g, \" \")\n    .trim();\n}\n\nfunction clampNumber(\n  value,\n  fallback,\n  minimum,\n  maximum\n) {\n  const parsed = Number(value);\n\n  if (!Number.isFinite(parsed)) {\n    return fallback;\n  }\n\n  return Math.min(\n    Math.max(Math.round(parsed), minimum),\n    maximum\n  );\n}\n\nfunction isISODate(value) {\n  return /^\\d{4}-\\d{2}-\\d{2}$/.test(\n    cleanString(value)\n  );\n}\n\nfunction shiftDate(isoDate, dayAmount) {\n  const date = new Date(\n    `${isoDate}T00:00:00.000Z`\n  );\n\n  date.setUTCDate(\n    date.getUTCDate() + dayAmount\n  );\n\n  return date\n    .toISOString()\n    .slice(0, 10);\n}\n\nconst opportunity = {\n  ...original,\n  ...savedRow\n};\n\nconst today =\n  cleanString(context.today);\n\nconst deadline =\n  cleanString(opportunity.deadline);\n\nconst deadlineConfidence =\n  cleanString(\n    opportunity.deadline_confidence\n  ).toLowerCase();\n\nconst reminderDaysBefore =\n  clampNumber(\n    context.preferences\n      ?.reminder_days_before,\n    7,\n    0,\n    90\n  );\n\nlet shouldCreateCalendar = true;\nlet calendarReason = null;\nlet reminderDate = null;\n\nif (!deadline || !isISODate(deadline)) {\n  shouldCreateCalendar = false;\n  calendarReason =\n    \"deadline_missing_or_invalid\";\n} else if (\n  ![\"high\", \"medium\"].includes(\n    deadlineConfidence\n  )\n) {\n  shouldCreateCalendar = false;\n  calendarReason =\n    \"deadline_confidence_too_low\";\n} else if (deadline < today) {\n  shouldCreateCalendar = false;\n  calendarReason =\n    \"deadline_already_passed\";\n} else {\n  const calculatedReminderDate =\n    shiftDate(\n      deadline,\n      -reminderDaysBefore\n    );\n\n  // When the preferred reminder day has\n  // already passed, create the reminder today.\n  reminderDate =\n    calculatedReminderDate < today\n      ? today\n      : calculatedReminderDate;\n}\n\nlet reminderStart = null;\nlet reminderEnd = null;\n\nif (shouldCreateCalendar) {\n  if (reminderDate === today) {\n    // Avoid creating a Calendar event in the\n    // past during manual testing.\n    reminderStart = new Date(\n      Date.now() + 5 * 60 * 1000\n    ).toISOString();\n\n    reminderEnd = new Date(\n      Date.now() + 35 * 60 * 1000\n    ).toISOString();\n  } else {\n    reminderStart =\n      `${reminderDate}T09:00:00+05:00`;\n\n    reminderEnd =\n      `${reminderDate}T09:30:00+05:00`;\n  }\n}\n\nconst whyRelevant = Array.isArray(\n  opportunity.why_relevant_list\n)\n  ? opportunity.why_relevant_list\n  : cleanString(\n      opportunity.why_relevant\n    )\n      .split(\"|\")\n      .map((entry) => entry.trim())\n      .filter(Boolean);\n\nconst descriptionParts = [\n  `Opportunity: ${cleanString(\n    opportunity.title\n  )}`,\n\n  opportunity.organizer\n    ? `Organizer: ${cleanString(\n        opportunity.organizer\n      )}`\n    : null,\n\n  opportunity.opportunity_type\n    ? `Type: ${cleanString(\n        opportunity.opportunity_type\n      )}`\n    : null,\n\n  opportunity.location\n    ? `Location: ${cleanString(\n        opportunity.location\n      )}`\n    : null,\n\n  opportunity.participation_mode\n    ? `Participation mode: ${cleanString(\n        opportunity.participation_mode\n      )}`\n    : null,\n\n  `Actual deadline: ${deadline}`,\n\n  `Relevance score: ${\n    opportunity.relevance_score ?? 0\n  }/100`,\n\n  opportunity.eligibility\n    ? `Eligibility: ${cleanString(\n        opportunity.eligibility\n      )}`\n    : null,\n\n  whyRelevant.length > 0\n    ? `Why relevant:\\n${whyRelevant\n        .map((reason) => `- ${reason}`)\n        .join(\"\\n\")}`\n    : null,\n\n  opportunity.recommended_action\n    ? `Recommended action: ${cleanString(\n        opportunity.recommended_action\n      )}`\n    : null,\n\n  opportunity.source_url\n    ? `Official source: ${cleanString(\n        opportunity.source_url\n      )}`\n    : null\n].filter(Boolean);\n\nreturn {\n  json: {\n    ...opportunity,\n\n    should_create_calendar:\n      shouldCreateCalendar,\n\n    calendar_reason:\n      calendarReason,\n\n    reminder_days_before:\n      reminderDaysBefore,\n\n    reminder_date:\n      reminderDate,\n\n    reminder_start:\n      reminderStart,\n\n    reminder_end:\n      reminderEnd,\n\n    calendar_summary:\n      `Opportunity deadline: ${\n        cleanString(opportunity.title) ||\n        \"Review application\"\n      }`,\n\n    calendar_description:\n      descriptionParts.join(\"\\n\\n\"),\n\n    calendar_location:\n      cleanString(\n        opportunity.location\n      ) || null\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2016,
+        -128
+      ],
+      "id": "984d6fc4-f937-40fd-9d8f-022132ab96f7",
+      "name": "Prepare Reminder Decision"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "f5d962b8-dc66-4cd2-a49f-e1d6351a894e",
+              "leftValue": "={{ $json.should_create_calendar }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": "={{ false }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2208,
+        -128
+      ],
+      "id": "a3f99896-c12a-431e-9cf0-9a3c7be1d0eb",
+      "name": "Create Calendar Reminder?"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return {\n  json: {\n    ...$json,\n\n    action_status:\n      \"saved_without_reminder\",\n\n    calendar_created: false,\n\n    calendar_event_id: null,\n\n    calendar_event_link: null\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        144
+      ],
+      "id": "6c5a911f-6be2-4d71-8e38-022cdeeafd4b",
+      "name": "Finalize Saved Without Reminder"
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "value": "YOUR_CALENDAR_ID",
+          "mode": "list",
+          "cachedResultName": "Primary Calendar"
+        },
+        "start": "={{ $json.reminder_start }}",
+        "end": "={{ $json.reminder_end }}",
+        "additionalFields": {
+          "description": "={{ $json.calendar_description }}",
+          "location": "={{ $json.calendar_location || \"\" }}",
+          "showMeAs": "transparent",
+          "summary": "={{ $json.calendar_summary }}"
+        }
+      },
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        2448,
+        -144
+      ],
+      "id": "5ea320b9-bc6b-468d-b14b-42e4a6178cd9",
+      "name": "Create Calendar Reminder"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const calendarEvent = $json ?? {};\n\nconst opportunity =\n  $(\"Prepare Reminder Decision\")\n    .item?.json ?? {};\n\nreturn {\n  json: {\n    ...opportunity,\n\n    calendar_created: true,\n\n    status: \"reminder_created\",\n\n    action_status:\n      \"reminder_created\",\n\n    calendar_event_id:\n      calendarEvent.id ?? null,\n\n    calendar_event_link:\n      calendarEvent.htmlLink ?? null\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2592,
+        -16
+      ],
+      "id": "067c27df-a811-4413-9fc5-4175b7944ef7",
+      "name": "Mark Reminder Created"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "AI Opportunity Radar"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Opportunities",
+          "mode": "list",
+          "cachedResultName": "Opportunities"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "normalized_url"
+          ],
+          "schema": [
+            {
+              "id": "opportunity_id",
+              "displayName": "opportunity_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "discovered_at",
+              "displayName": "discovered_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "opportunity_type",
+              "displayName": "opportunity_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "organizer",
+              "displayName": "organizer",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "location",
+              "displayName": "location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "participation_mode",
+              "displayName": "participation_mode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "deadline",
+              "displayName": "deadline",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "eligibility",
+              "displayName": "eligibility",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "relevance_score",
+              "displayName": "relevance_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "why_relevant",
+              "displayName": "why_relevant",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "recommended_action",
+              "displayName": "recommended_action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "source_url",
+              "displayName": "source_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "normalized_url",
+              "displayName": "normalized_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "source_domain",
+              "displayName": "source_domain",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "deadline_confidence",
+              "displayName": "deadline_confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "calendar_created",
+              "displayName": "calendar_created",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "handlingExtraData": "ignoreIt"
+        }
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2752,
+        -16
+      ],
+      "id": "abb31715-20dc-411c-af83-0b3526c23723",
+      "name": "Update Opportunity Reminder Status"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const completed =\n  $(\"Mark Reminder Created\")\n    .item?.json ?? {};\n\nreturn {\n  json: completed\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2832,
+        208
+      ],
+      "id": "4772f47e-616a-4eff-938b-4a81123f4374",
+      "name": "Finalize Reminder Result"
+    },
+    {
+      "parameters": {
+        "jsCode": "const context =\n  $(\"Build Research Context\")\n    .first()?.json ?? {};\n\nconst results = $input\n  .all()\n  .map((item) => item.json ?? {});\n\nfunction cleanString(value) {\n  return String(value ?? \"\")\n    .replace(/\\s+/g, \" \")\n    .trim();\n}\n\nfunction escapeHtml(value) {\n  return cleanString(value)\n    .replace(/&/g, \"&amp;\")\n    .replace(/</g, \"&lt;\")\n    .replace(/>/g, \"&gt;\")\n    .replace(/\"/g, \"&quot;\")\n    .replace(/'/g, \"&#039;\");\n}\n\nfunction humanize(value) {\n  return cleanString(value)\n    .replace(/_/g, \" \")\n    .replace(/\\b\\w/g, (letter) =>\n      letter.toUpperCase()\n    );\n}\n\nfunction formatDate(value) {\n  const text = cleanString(value);\n\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(text)) {\n    return \"Not verified\";\n  }\n\n  const date = new Date(\n    `${text}T00:00:00Z`\n  );\n\n  return new Intl.DateTimeFormat(\n    \"en-GB\",\n    {\n      day: \"numeric\",\n      month: \"long\",\n      year: \"numeric\",\n      timeZone: \"UTC\"\n    }\n  ).format(date);\n}\n\nfunction getRelevantReasons(opportunity) {\n  if (\n    Array.isArray(\n      opportunity.why_relevant_list\n    )\n  ) {\n    return opportunity\n      .why_relevant_list\n      .map(cleanString)\n      .filter(Boolean);\n  }\n\n  return cleanString(\n    opportunity.why_relevant\n  )\n    .split(\"|\")\n    .map((reason) => reason.trim())\n    .filter(Boolean);\n}\n\nconst opportunityResults = results.filter(\n  (item) =>\n    item.record_type === \"opportunity\"\n);\n\nconst accepted = opportunityResults\n  .filter((item) => item.accepted === true)\n  .sort(\n    (first, second) =>\n      Number(\n        second.relevance_score ?? 0\n      ) -\n      Number(\n        first.relevance_score ?? 0\n      )\n  );\n\nconst rejected = opportunityResults.filter(\n  (item) => item.accepted !== true\n);\n\nconst remindersCreated = accepted.filter(\n  (item) =>\n    item.calendar_created === true\n);\n\nconst savedWithoutReminder =\n  accepted.filter(\n    (item) =>\n      item.calendar_created !== true\n  );\n\nconst rejectionCounts = {};\n\nfor (const item of rejected) {\n  const reasons = Array.isArray(\n    item.rejection_reasons\n  )\n    ? item.rejection_reasons\n    : [\"unspecified_rejection\"];\n\n  for (const reason of reasons) {\n    rejectionCounts[reason] =\n      (rejectionCounts[reason] ?? 0) + 1;\n  }\n}\n\nconst researchSummary =\n  results.find(\n    (item) => item.research_summary\n  )?.research_summary ?? {};\n\nconst userName =\n  cleanString(\n    context.preferences?.user_name\n  ) || \"there\";\n\nconst recipient =\n  cleanString(\n    context.preferences?.email\n  ).toLowerCase();\n\nif (!recipient) {\n  throw new Error(\n    \"The active Preferences row does not contain an email address.\"\n  );\n}\n\nconst runDate = formatDate(\n  context.today\n);\n\nconst opportunityCards = accepted\n  .map((opportunity, index) => {\n    const reasons =\n      getRelevantReasons(opportunity);\n\n    const reasonsHtml =\n      reasons.length > 0\n        ? `\n          <ul style=\"margin:8px 0 14px 20px;padding:0;\">\n            ${reasons\n              .map(\n                (reason) =>\n                  `<li style=\"margin-bottom:5px;\">${escapeHtml(\n                    reason\n                  )}</li>`\n              )\n              .join(\"\")}\n          </ul>\n        `\n        : `\n          <p style=\"color:#666;\">\n            No detailed relevance reasons were provided.\n          </p>\n        `;\n\n    const calendarText =\n      opportunity.calendar_created\n        ? `Reminder created for ${formatDate(\n            opportunity.reminder_date\n          )}`\n        : `No reminder created: ${humanize(\n            opportunity.calendar_reason ||\n              \"deadline not verified\"\n          )}`;\n\n    const sourceUrl =\n      escapeHtml(\n        opportunity.source_url\n      );\n\n    return `\n      <div style=\"\n        border:1px solid #e5e7eb;\n        border-radius:10px;\n        padding:18px;\n        margin:16px 0;\n        background:#ffffff;\n      \">\n        <div style=\"\n          font-size:13px;\n          color:#6b7280;\n          margin-bottom:6px;\n        \">\n          Opportunity ${index + 1}\n        </div>\n\n        <h2 style=\"\n          margin:0 0 8px 0;\n          font-size:20px;\n          color:#111827;\n        \">\n          ${escapeHtml(\n            opportunity.title\n          )}\n        </h2>\n\n        <p style=\"margin:5px 0;\">\n          <strong>Type:</strong>\n          ${escapeHtml(\n            opportunity.opportunity_type ||\n              \"Unknown\"\n          )}\n        </p>\n\n        <p style=\"margin:5px 0;\">\n          <strong>Organizer:</strong>\n          ${escapeHtml(\n            opportunity.organizer ||\n              \"Not verified\"\n          )}\n        </p>\n\n        <p style=\"margin:5px 0;\">\n          <strong>Location:</strong>\n          ${escapeHtml(\n            opportunity.location ||\n              \"Not verified\"\n          )}\n        </p>\n\n        <p style=\"margin:5px 0;\">\n          <strong>Mode:</strong>\n          ${escapeHtml(\n            opportunity.participation_mode ||\n              \"Unknown\"\n          )}\n        </p>\n\n        <p style=\"margin:5px 0;\">\n          <strong>Deadline:</strong>\n          ${escapeHtml(\n            formatDate(\n              opportunity.deadline\n            )\n          )}\n        </p>\n\n        <p style=\"margin:5px 0;\">\n          <strong>Relevance:</strong>\n          ${Number(\n            opportunity.relevance_score ??\n              0\n          )}/100\n        </p>\n\n        <p style=\"margin:14px 0 5px 0;\">\n          <strong>Why it matches:</strong>\n        </p>\n\n        ${reasonsHtml}\n\n        <p style=\"margin:5px 0;\">\n          <strong>Recommended action:</strong>\n          ${escapeHtml(\n            opportunity.recommended_action ||\n              \"Review the official page.\"\n          )}\n        </p>\n\n        <p style=\"margin:5px 0;\">\n          <strong>Calendar:</strong>\n          ${escapeHtml(calendarText)}\n        </p>\n\n        ${\n          sourceUrl\n            ? `\n              <p style=\"margin:14px 0 0 0;\">\n                <a\n                  href=\"${sourceUrl}\"\n                  style=\"color:#2563eb;\"\n                >\n                  Open official source\n                </a>\n              </p>\n            `\n            : \"\"\n        }\n      </div>\n    `;\n  })\n  .join(\"\");\n\nconst rejectionRows =\n  Object.entries(rejectionCounts)\n    .sort(\n      (first, second) =>\n        second[1] - first[1]\n    )\n    .map(\n      ([reason, count]) => `\n        <li>\n          ${escapeHtml(\n            humanize(reason)\n          )}: ${count}\n        </li>\n      `\n    )\n    .join(\"\");\n\nconst noResultsSection =\n  accepted.length === 0\n    ? `\n      <div style=\"\n        padding:18px;\n        border-radius:10px;\n        background:#f3f4f6;\n        margin:18px 0;\n      \">\n        <strong>\n          No new verified opportunities matched\n          your preferences in this run.\n        </strong>\n\n        <p style=\"margin-bottom:0;\">\n          Previously saved, expired, low-scoring,\n          invalid, or irrelevant results were ignored.\n        </p>\n      </div>\n    `\n    : \"\";\n\nconst subject =\n  accepted.length > 0\n    ? `AI Opportunity Radar: ${accepted.length} new ${\n        accepted.length === 1\n          ? \"opportunity\"\n          : \"opportunities\"\n      }`\n    : \"AI Opportunity Radar: No new matches\";\n\nconst htmlBody = `\n<!DOCTYPE html>\n<html>\n  <body style=\"\n    margin:0;\n    padding:24px;\n    background:#f9fafb;\n    color:#1f2937;\n    font-family:Arial,Helvetica,sans-serif;\n    line-height:1.5;\n  \">\n    <div style=\"\n      max-width:760px;\n      margin:0 auto;\n    \">\n      <h1 style=\"\n        color:#111827;\n        margin-bottom:4px;\n      \">\n        AI Opportunity Radar\n      </h1>\n\n      <p style=\"\n        margin-top:0;\n        color:#6b7280;\n      \">\n        Research run: ${escapeHtml(\n          runDate\n        )}\n      </p>\n\n      <p>\n        Hello ${escapeHtml(userName)},\n      </p>\n\n      <table\n        role=\"presentation\"\n        style=\"\n          width:100%;\n          border-collapse:separate;\n          border-spacing:8px;\n          margin:12px -8px;\n        \"\n      >\n        <tr>\n          <td style=\"\n            padding:14px;\n            background:#ffffff;\n            border:1px solid #e5e7eb;\n            border-radius:8px;\n          \">\n            <strong>${accepted.length}</strong>\n            <br>\n            New matches\n          </td>\n\n          <td style=\"\n            padding:14px;\n            background:#ffffff;\n            border:1px solid #e5e7eb;\n            border-radius:8px;\n          \">\n            <strong>${\n              remindersCreated.length\n            }</strong>\n            <br>\n            Reminders created\n          </td>\n\n          <td style=\"\n            padding:14px;\n            background:#ffffff;\n            border:1px solid #e5e7eb;\n            border-radius:8px;\n          \">\n            <strong>${rejected.length}</strong>\n            <br>\n            Results ignored\n          </td>\n        </tr>\n      </table>\n\n      ${noResultsSection}\n\n      ${opportunityCards}\n\n      ${\n        rejected.length > 0\n          ? `\n            <div style=\"\n              margin-top:24px;\n              padding:16px;\n              background:#ffffff;\n              border:1px solid #e5e7eb;\n              border-radius:8px;\n            \">\n              <h3 style=\"margin-top:0;\">\n                Ignored-result summary\n              </h3>\n\n              <ul style=\"\n                margin-bottom:0;\n                padding-left:20px;\n              \">\n                ${rejectionRows}\n              </ul>\n            </div>\n          `\n          : \"\"\n      }\n\n      <div style=\"\n        margin-top:24px;\n        color:#6b7280;\n        font-size:13px;\n      \">\n        <p>\n          Searches recorded:\n          ${\n            Array.isArray(\n              researchSummary.search_queries\n            )\n              ? researchSummary\n                  .search_queries.length\n              : 0\n          }\n        </p>\n\n        <p>\n          Pages extracted:\n          ${Number(\n            researchSummary.pages_extracted ??\n              0\n          )}\n        </p>\n\n        <p>\n          Saved without Calendar reminder:\n          ${savedWithoutReminder.length}\n        </p>\n\n        <p>\n          Always verify eligibility and deadlines\n          on the official source before applying.\n        </p>\n      </div>\n    </div>\n  </body>\n</html>\n`;\n\nconst plainTextLines = [\n  \"AI Opportunity Radar\",\n  `Research run: ${runDate}`,\n  \"\",\n  `New opportunities: ${accepted.length}`,\n  `Calendar reminders: ${remindersCreated.length}`,\n  `Ignored results: ${rejected.length}`,\n  \"\"\n];\n\nfor (\n  const [index, opportunity]\n  of accepted.entries()\n) {\n  plainTextLines.push(\n    `${index + 1}. ${\n      opportunity.title\n    }`,\n    `Score: ${\n      opportunity.relevance_score\n    }/100`,\n    `Deadline: ${formatDate(\n      opportunity.deadline\n    )}`,\n    `Source: ${\n      opportunity.source_url\n    }`,\n    \"\"\n  );\n}\n\nif (accepted.length === 0) {\n  plainTextLines.push(\n    \"No new verified opportunities matched your preferences.\"\n  );\n}\n\nreturn [\n  {\n    json: {\n      recipient,\n\n      subject,\n\n      html_body: htmlBody,\n\n      plain_text_body:\n        plainTextLines.join(\"\\n\"),\n\n      digest_metrics: {\n        processed:\n          opportunityResults.length,\n\n        accepted:\n          accepted.length,\n\n        rejected:\n          rejected.length,\n\n        reminders_created:\n          remindersCreated.length,\n\n        saved_without_reminder:\n          savedWithoutReminder.length\n      }\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        -432
+      ],
+      "id": "d2e3995f-a597-446f-a75f-9508d882e8c7",
+      "name": "Build Gmail Digest"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.recipient }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html_body }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1776,
+        -432
+      ],
+      "id": "8963baab-52f5-455b-822c-cdfce5773608",
+      "name": "Send Gmail Digest"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual test": {
+      "main": [
+        [
+          {
+            "node": "Read Preferences",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Preferences": {
+      "main": [
+        [
+          {
+            "node": "Read Opportunity History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Opportunity History": {
+      "main": [
+        [
+          {
+            "node": "Build Research Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Research Context": {
+      "main": [
+        [
+          {
+            "node": "AI Opportunity Research Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Opportunities": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Opportunity Research Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Opportunity Page": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Opportunity Research Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Opportunity Research Agent": {
+      "main": [
+        [
+          {
+            "node": "Normalize Opportunity Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Opportunity Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Normalize Opportunity Results",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Opportunity Research Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Normalize Opportunity Results",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Opportunity Results": {
+      "main": [
+        [
+          {
+            "node": "Validate and Deduplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate and Deduplicate": {
+      "main": [
+        [
+          {
+            "node": "Loop Through Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Accepted?": {
+      "main": [
+        [
+          {
+            "node": "Save Opportunity",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize Rejected Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Through Results": {
+      "main": [
+        [
+          {
+            "node": "Build Gmail Digest",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Accepted?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Rejected Result": {
+      "main": [
+        [
+          {
+            "node": "Loop Through Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Opportunity": {
+      "main": [
+        [
+          {
+            "node": "Prepare Reminder Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Reminder Decision": {
+      "main": [
+        [
+          {
+            "node": "Create Calendar Reminder?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Calendar Reminder?": {
+      "main": [
+        [
+          {
+            "node": "Create Calendar Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize Saved Without Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Saved Without Reminder": {
+      "main": [
+        [
+          {
+            "node": "Loop Through Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Calendar Reminder": {
+      "main": [
+        [
+          {
+            "node": "Mark Reminder Created",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Reminder Created": {
+      "main": [
+        [
+          {
+            "node": "Update Opportunity Reminder Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Opportunity Reminder Status": {
+      "main": [
+        [
+          {
+            "node": "Finalize Reminder Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Reminder Result": {
+      "main": [
+        [
+          {
+            "node": "Loop Through Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Gmail Digest": {
+      "main": [
+        [
+          {
+            "node": "Send Gmail Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly Schedule": {
+      "main": [
+        [
+          {
+            "node": "Read Preferences",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "timezone": "Asia/Karachi",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "tags": []
+}
